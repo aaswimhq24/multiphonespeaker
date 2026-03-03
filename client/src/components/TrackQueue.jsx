@@ -1,74 +1,88 @@
-/**
- * TrackQueue.jsx
- *
- * Pure presentational component for a BeatSync-style queue.
- * - No sockets, no hooks, no internal state. Props-only.
- *
- * Props:
- *   - tracks: Array of track objects { id, filename, title, artist }
- *   - currentIndex: number
- *   - isHost: boolean
- *   - onSelect: function(index)
- */
-import React from "react";
+import { Music, Crown } from "lucide-react";
 
-export default function TrackQueue({ tracks = [], currentIndex = 0, isHost = false, onSelect = () => {} }) {
+export default function TrackQueue({
+  queue = [],
+  currentTrackIndex,
+  isAdmin,
+  selectTrack,
+}) {
   return (
-    <div className="w-full max-w-3xl mx-auto bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-slate-200">Queue</h3>
-        <span className="text-xs text-slate-400">{tracks.length} tracks</span>
+    <div className="w-full backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl shadow-2xl p-6 space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold">Queue</h3>
+        <span className="text-sm text-slate-400">
+          {queue.length} {queue.length === 1 ? "track" : "tracks"}
+        </span>
       </div>
 
-      <ul className="divide-y divide-slate-800">
-        {tracks.length === 0 && (
-          <li className="py-6 text-center text-sm text-slate-500">No tracks in the queue</li>
-        )}
+      {/* Empty State */}
+      {queue.length === 0 && (
+        <div className="text-center text-slate-400 py-8 text-sm">
+          No tracks in the queue
+        </div>
+      )}
 
-        {tracks.map((track, index) => {
-          const isCurrent = index === currentIndex;
-          const title = track.filename || track.title || "Untitled";
-          const subtitle = track.artist || track.album || "";
+      {/* Track List */}
+      <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+        {queue.map((track, index) => {
+          const isActive = index === currentTrackIndex;
 
           return (
-            <li
-              key={track.id ?? `${title}-${index}`}
-              className={`flex items-center justify-between gap-4 py-3 px-3 rounded-md transition-colors
-                ${isCurrent ? "bg-gradient-to-r from-emerald-600/6 to-transparent" : "hover:bg-slate-800/50"}`}
+            <div
+              key={track.id}
+              onClick={() => isAdmin && selectTrack?.(index)}
+              className={`
+                flex items-center justify-between
+                px-4 py-3 rounded-xl
+                transition cursor-pointer
+                ${
+                  isActive
+                    ? "bg-emerald-500/20 border border-emerald-400/40"
+                    : "bg-white/5 hover:bg-white/10"
+                }
+              `}
             >
               <div className="flex items-center gap-3">
                 <div
-                  className={`w-2 h-8 rounded-full flex-shrink-0 ${isCurrent ? "bg-emerald-400" : "bg-slate-700/60"}`}
-                  aria-hidden
-                />
+                  className={`
+                    p-2 rounded-lg
+                    ${
+                      isActive
+                        ? "bg-emerald-500/30"
+                        : "bg-white/10"
+                    }
+                  `}
+                >
+                  <Music className="w-4 h-4 text-emerald-400" />
+                </div>
 
-                <div className="min-w-0">
-                  <div className={`text-sm font-medium truncate ${isCurrent ? "text-white" : "text-slate-200"}`}>{title}</div>
-                  {subtitle && <div className="text-xs text-slate-400 truncate mt-0.5">{subtitle}</div>}
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium truncate max-w-[200px]">
+                    {track.filename}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    #{index + 1}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                {isCurrent && (
-                  <span className="text-emerald-400 text-xs font-semibold">Now Playing</span>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => { if (isHost) onSelect(index); }}
-                  disabled={!isHost}
-                  className={`text-sm px-3 py-1 rounded-md font-medium transition-colors outline-none
-                    ${isHost ? "text-emerald-400 hover:bg-emerald-600/10" : "text-slate-500 cursor-default"}`}
-                  aria-pressed={isCurrent}
-                  aria-label={isCurrent ? "Current track" : `Select track ${index + 1}`}
-                >
-                  {isHost ? "Select" : "—"}
-                </button>
-              </div>
-            </li>
+              {isActive && (
+                <div className="text-emerald-400 text-xs font-semibold">
+                  Playing
+                </div>
+              )}
+            </div>
           );
         })}
-      </ul>
+      </div>
+
+      {/* Admin Hint */}
+      {isAdmin && queue.length > 0 && (
+        <div className="text-xs text-slate-400 text-center pt-2">
+          Tap a track to select it
+        </div>
+      )}
     </div>
   );
 }

@@ -1,29 +1,3 @@
-/**
- * usePlayback.js
- *
- * Client-side playback controller for BeatSync-style synchronized music.
- *
- * Consumes:
- *   socket    — the Socket.io instance owned by useSocket
- *   roomCode  — current room identifier
- *
- * Responsibilities:
- *   - Listen to server-driven playback events and drive the Web Audio engine:
- *       track_selected      → fetch + decode audio file, reset state
- *       playback_scheduled  → schedule synchronized audio start
- *       playback_paused     → stop audio engine
- *       track_seeked        → jump to new position
- *   - Poll the audio engine for progress updates (200 ms interval)
- *   - Expose playback control functions that emit to the server:
- *       play / pause / next / prev / seek
- *
- * What this hook does NOT do:
- *   - No socket creation          → useSocket.js
- *   - No queue / room state       → useSocket.js
- *   - No DOM manipulation
- *   - No room creation logic
- */
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   loadAudioFile,
@@ -34,28 +8,25 @@ import {
   getDuration,
 } from "../services/audioEngine";
 
-// How far ahead (in seconds) to schedule audio relative to AudioContext.currentTime
-const SCHEDULE_AHEAD_SEC = 0.1;
+// Small safety buffer to avoid scheduling too close to currentTime
+const MIN_SCHEDULE_AHEAD_MS = 50;
 
 export default function usePlayback(socket, roomCode) {
-  // ── Playback state ─────────────────────────────────────────────────────────
-  const [isPlaying, setIsPlaying]                 = useState(false);
-  const [duration, setDuration]                   = useState(0);
-  const [progress, setProgress]                   = useState(0);
+  /* -------------------------------------------------------------------------- */
+  /*                                  State                                     */
+  /* -------------------------------------------------------------------------- */
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [progress, setProgress] = useState(0);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(-1);
 
-  // True once the audio file for the current track has been decoded and is ready
   const isFileLoadedRef = useRef(false);
+  const driftCheckIntervalRef = useRef(null);
 
-  // Stable ref so emit callbacks never close over a stale roomCode
-  const roomCodeRef = useRef(roomCode);
-  useEffect(() => {
-    roomCodeRef.current = roomCode;
-  }, [roomCode]);
-
-  // ---------------------------------------------------------------------------
-  // Progress polling loop — runs independently of socket
-  // ---------------------------------------------------------------------------
+  /* -------------------------------------------------------------------------- */
+  /*                           Progress Polling Loop                            */
+  /* -------------------------------------------------------------------------- */
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -65,18 +36,38 @@ export default function usePlayback(socket, roomCode) {
     return () => clearInterval(interval);
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Socket listeners
-  // Re-registered whenever the socket reference changes (e.g. reconnect).
-  // Named handler references are used so socket.off() removes the exact listener.
-  // ---------------------------------------------------------------------------
+  /* -------------------------------------------------------------------------- */
+  /*                              Drift Correction                              */
+  /* -------------------------------------------------------------------------- */
+
+  const startDriftCorrection = useCallback(() => {
+    clearInterval(driftCheckIntervalRef.current);
+
+    driftCheckIntervalRef.current = setInterval(() => {
+      if (!isPlaying) return;
+
+      const actual = getPlaybackProgress();
+      const expected = progress;
+
+      const driftMs = Math.abs(actual - expected) * 1000;
+
+      // If drift exceeds 120ms, correct
+      if (driftMs > 120) {
+        stopPlayback();
+        schedulePlayback(getCurrentTime() + 0.1, actual);
+      }
+    }, 3000);
+  }, [isPlaying, progress]);
+
+  /* -------------------------------------------------------------------------- */
+  /*                               Socket Events                                */
+  /* -------------------------------------------------------------------------- */
 
   useEffect(() => {
     if (!socket) return;
 
-    // ── track_selected ───────────────────────────────────────────────────────
-    // Emitted by server when admin calls select_track / next_track / prev_track.
-    // Payload: { index: number, track: { filename, fileUrl, durationMs } }
+    /* ----------------------------- Track Selected ---------------------------- */
+
     const onTrackSelected = async ({ index, track }) => {
       setCurrentTrackIndex(index);
       stopPlayback();
@@ -87,110 +78,104 @@ export default function usePlayback(socket, roomCode) {
       try {
         const fullUrl = `http://${window.location.hostname}:5000${track.fileUrl}`;
         const response = await fetch(fullUrl);
-        const blob     = await response.blob();
-        const file     = new File([blob], track.filename);
 
-        await loadAudioFile(file);
+        if (!response.ok) throw new Error("Failed to fetch audio file");
+
+        const arrayBuffer = await response.arrayBuffer();
+        await loadAudioFile(arrayBuffer);
+
         setDuration(getDuration());
         isFileLoadedRef.current = true;
       } catch (err) {
-        console.error("[usePlayback] Failed to load track:", err);
+        console.error("Audio load failed:", err);
       }
     };
 
-    // ── playback_scheduled ───────────────────────────────────────────────────
-    // Emitted by server after start_playback is processed.
-    // Payload: { scheduledStartTimeMs, roomTimeMs, serverTime }
-    //
-    // BeatSync sync math:
-    //   msUntilStart = scheduledStartTimeMs − estimatedServerNow
-    //   startTimeSec = AudioContext.currentTime + max(msUntilStart, 0) / 1000
-    //   offsetSec    = roomTimeMs / 1000   (resume position)
-    const onPlaybackScheduled = ({ scheduledStartTimeMs, roomTimeMs, serverTime }) => {
+    /* -------------------------- Playback Scheduled -------------------------- */
+
+    const onPlaybackScheduled = ({
+      scheduledStartTimeMs,
+      roomTimeMs,
+      serverTime,
+    }) => {
       if (!isFileLoadedRef.current) return;
 
-      const nowClient    = Date.now();
-      // Compensate for one-way network delay using the server timestamp echo
-      const estimatedServerNow = serverTime + (nowClient - serverTime);
-      const msUntilStart       = scheduledStartTimeMs - estimatedServerNow;
-      const startTimeSec       = getCurrentTime() + Math.max(msUntilStart, 0) / 1000;
-      const offsetSec          = roomTimeMs / 1000;
+      const nowClient = Date.now();
+
+      // Estimate one-way delay
+      const oneWayDelay = (nowClient - serverTime) / 2;
+
+      const estimatedServerNow = serverTime + oneWayDelay;
+
+      let msUntilStart = scheduledStartTimeMs - estimatedServerNow;
+
+      if (msUntilStart < MIN_SCHEDULE_AHEAD_MS) {
+        msUntilStart = MIN_SCHEDULE_AHEAD_MS;
+      }
+
+      const startTimeSec =
+        getCurrentTime() + msUntilStart / 1000;
+
+      const offsetSec = roomTimeMs / 1000;
 
       stopPlayback();
       schedulePlayback(startTimeSec, offsetSec);
+
       setIsPlaying(true);
+      startDriftCorrection();
     };
 
-    // ── playback_paused ──────────────────────────────────────────────────────
-    // Emitted by server after pause_playback is processed.
-    // Payload: { roomCode, roomTimeMs, serverTime }
+    /* ----------------------------- Playback Paused --------------------------- */
+
     const onPlaybackPaused = () => {
       stopPlayback();
       setIsPlaying(false);
+      clearInterval(driftCheckIntervalRef.current);
     };
 
-    // ── track_seeked ─────────────────────────────────────────────────────────
-    // Emitted by server after seek_track is processed.
-    // Payload: { time } — new position in seconds
-    const onTrackSeeked = ({ time }) => {
-      stopPlayback();
-      schedulePlayback(getCurrentTime() + SCHEDULE_AHEAD_SEC, time);
-    };
-
-    socket.on("track_selected",     onTrackSelected);
+    socket.on("track_selected", onTrackSelected);
     socket.on("playback_scheduled", onPlaybackScheduled);
-    socket.on("playback_paused",    onPlaybackPaused);
-    socket.on("track_seeked",       onTrackSeeked);
+    socket.on("playback_paused", onPlaybackPaused);
 
     return () => {
-      socket.off("track_selected",     onTrackSelected);
+      socket.off("track_selected", onTrackSelected);
       socket.off("playback_scheduled", onPlaybackScheduled);
-      socket.off("playback_paused",    onPlaybackPaused);
-      socket.off("track_seeked",       onTrackSeeked);
+      socket.off("playback_paused", onPlaybackPaused);
+      clearInterval(driftCheckIntervalRef.current);
     };
-  }, [socket]);
+  }, [socket, startDriftCorrection]);
 
-  // ---------------------------------------------------------------------------
-  // Playback control — emit to server; server broadcasts back to all clients
-  // Guards: no-op if socket or roomCode is unavailable
-  // ---------------------------------------------------------------------------
+  /* -------------------------------------------------------------------------- */
+  /*                               Playback Controls                            */
+  /* -------------------------------------------------------------------------- */
 
-  /** Request the server to schedule synchronized playback for the whole room. */
   const play = useCallback(() => {
-    if (!socket || !roomCodeRef.current) return;
-    socket.emit("start_playback", { roomCode: roomCodeRef.current });
-  }, [socket]);
+    if (!socket || !roomCode) return;
+    socket.emit("start_playback", { roomCode });
+  }, [socket, roomCode]);
 
-  /** Request the server to pause playback for the whole room. */
   const pause = useCallback(() => {
-    if (!socket || !roomCodeRef.current) return;
-    socket.emit("pause_playback", { roomCode: roomCodeRef.current });
-  }, [socket]);
+    if (!socket || !roomCode) return;
+    socket.emit("pause_playback", { roomCode });
+  }, [socket, roomCode]);
 
-  /** Request the server to advance to the next track. */
   const next = useCallback(() => {
-    if (!socket || !roomCodeRef.current) return;
-    socket.emit("next_track", { roomCode: roomCodeRef.current });
-  }, [socket]);
+    if (!socket || !roomCode) return;
+    socket.emit("next_track", { roomCode });
+  }, [socket, roomCode]);
 
-  /** Request the server to go back to the previous track. */
   const prev = useCallback(() => {
-    if (!socket || !roomCodeRef.current) return;
-    socket.emit("prev_track", { roomCode: roomCodeRef.current });
-  }, [socket]);
+    if (!socket || !roomCode) return;
+    socket.emit("prev_track", { roomCode });
+  }, [socket, roomCode]);
 
-  /**
-   * Request the server to seek to a specific position.
-   * @param {number} time — seek target in seconds
-   */
-  const seek = useCallback((time) => {
-    if (!socket || !roomCodeRef.current) return;
-    socket.emit("seek_track", { roomCode: roomCodeRef.current, time });
-  }, [socket]);
-
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
+  const seek = useCallback(
+    (time) => {
+      if (!socket || !roomCode) return;
+      socket.emit("seek_track", { roomCode, time });
+    },
+    [socket, roomCode]
+  );
 
   const formatTime = (seconds) => {
     if (!seconds || seconds < 0) return "0:00";
@@ -199,25 +184,20 @@ export default function usePlayback(socket, roomCode) {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // ---------------------------------------------------------------------------
-  // Public API
-  // ---------------------------------------------------------------------------
+  /* -------------------------------------------------------------------------- */
+  /*                                 Public API                                 */
+  /* -------------------------------------------------------------------------- */
 
   return {
-    // State
     isPlaying,
     duration,
     progress,
     currentTrackIndex,
-
-    // Controls (emit to server → server broadcasts → all clients react)
     play,
     pause,
     next,
     prev,
     seek,
-
-    // Utility
     formatTime,
   };
 }

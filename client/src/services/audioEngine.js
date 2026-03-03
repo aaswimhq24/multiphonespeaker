@@ -1,69 +1,118 @@
+/*
+ * audioEngine.js
+ * High‑precision Web Audio engine for synchronized playback
+ * Optimized for low drift, accurate scheduling, and minimal overhead
+ */
+
 let audioContext = null;
 let audioBuffer = null;
 let sourceNode = null;
-let playbackStartTime = null;   // when playback actually started (AudioContext time)
-let playbackOffset = 0;         // starting offset in seconds
+let gainNode = null;
 
-export async function initAudioContext() {
+let playbackStartTime = 0; // AudioContext time when playback started
+let playbackOffset = 0;    // Offset in seconds inside track
+
+/* -------------------------------------------------------------------------- */
+/*                            Context Initialization                           */
+/* -------------------------------------------------------------------------- */
+
+function getAudioContext() {
   if (!audioContext) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  }
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      latencyHint: "interactive",
+    });
 
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
+    gainNode = audioContext.createGain();
+    gainNode.connect(audioContext.destination);
   }
-
   return audioContext;
 }
 
-export async function loadAudioFile(file) {
-  const ctx = await initAudioContext();
+/* -------------------------------------------------------------------------- */
+/*                               Load Audio File                               */
+/* -------------------------------------------------------------------------- */
 
-  const arrayBuffer = await file.arrayBuffer();
-  audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+export async function loadAudioFile(arrayBuffer) {
+  const ctx = getAudioContext();
+
+  stopPlayback();
+
+  audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+
+  playbackOffset = 0;
+  playbackStartTime = 0;
 }
 
-export function schedulePlayback(startTimeSec, offsetSec = 0) {
-  if (!audioContext || !audioBuffer) return;
+/* -------------------------------------------------------------------------- */
+/*                              Schedule Playback                              */
+/* -------------------------------------------------------------------------- */
 
-  sourceNode = audioContext.createBufferSource();
+export function schedulePlayback(startTimeSec, offsetSec = 0) {
+  const ctx = getAudioContext();
+
+  if (!audioBuffer) return;
+
+  stopPlayback();
+
+  sourceNode = ctx.createBufferSource();
   sourceNode.buffer = audioBuffer;
-  sourceNode.connect(audioContext.destination);
+  sourceNode.connect(gainNode);
 
   playbackStartTime = startTimeSec;
   playbackOffset = offsetSec;
 
-  sourceNode.start(startTimeSec, offsetSec);
+  try {
+    sourceNode.start(startTimeSec, offsetSec);
+  } catch (err) {
+    console.error("Playback scheduling failed:", err);
+  }
+
+  sourceNode.onended = () => {
+    sourceNode = null;
+  };
 }
+
+/* -------------------------------------------------------------------------- */
+/*                                Stop Playback                                */
+/* -------------------------------------------------------------------------- */
 
 export function stopPlayback() {
   if (sourceNode) {
-    sourceNode.stop();
+    try {
+      sourceNode.stop();
+    } catch {}
     sourceNode.disconnect();
     sourceNode = null;
   }
-
-  playbackStartTime = null;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                             Playback Information                            */
+/* -------------------------------------------------------------------------- */
+
 export function getCurrentTime() {
-  if (!audioContext) return 0;
-  return audioContext.currentTime;
+  const ctx = getAudioContext();
+  return ctx.currentTime;
 }
 
 export function getPlaybackProgress() {
-  if (!audioContext) return 0;
+  const ctx = getAudioContext();
 
-  if (playbackStartTime === null) {
-    return playbackOffset;
-  }
+  if (!sourceNode) return playbackOffset;
 
-  const now = audioContext.currentTime;
-  const elapsed = now - playbackStartTime;
-
-  return playbackOffset + elapsed;
+  const elapsed = ctx.currentTime - playbackStartTime;
+  return playbackOffset + Math.max(elapsed, 0);
 }
 
 export function getDuration() {
   return audioBuffer ? audioBuffer.duration : 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                               Volume Control                                */
+/* -------------------------------------------------------------------------- */
+
+export function setVolume(value) {
+  if (!gainNode) return;
+  gainNode.gain.value = value;
 }
