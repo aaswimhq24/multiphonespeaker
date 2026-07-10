@@ -119,7 +119,7 @@ export default function usePlayback(socket, roomCode) {
       const offsetSec = roomTimeMs / 1000;
 
       stopPlayback();
-      schedulePlayback(startTimeSec, offsetSec);
+      schedulePlayback(startTimeSec + 0.2, offsetSec);
 
       setIsPlaying(true);
       startDriftCorrection();

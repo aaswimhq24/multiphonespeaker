@@ -33,7 +33,7 @@ export default function App() {
     leaveRoom,
     addTrack,
     selectTrack,
-  } = useSocket(SERVER_URL);
+  } = useSocket();
 
   const {
     isPlaying,

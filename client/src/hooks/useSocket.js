@@ -18,7 +18,9 @@ export default function useSocket(serverUrl) {
   /* -------------------------------------------------------------------------- */
 
   useEffect(() => {
-    const socketInstance = io(serverUrl, {
+    const SOCKET_URL = `http://${window.location.hostname}:5000`;
+
+    const socketInstance = io(SOCKET_URL, {
       transports: ["websocket"],
       reconnectionAttempts: 5,
     });
@@ -59,7 +61,7 @@ export default function useSocket(serverUrl) {
     return () => {
       socketInstance.disconnect();
     };
-  }, [serverUrl]);
+  }, []);
 
   /* -------------------------------------------------------------------------- */
   /*                               Room Actions                                 */

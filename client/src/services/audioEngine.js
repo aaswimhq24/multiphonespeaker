@@ -1,6 +1,6 @@
 /*
  * audioEngine.js
- * High‑precision Web Audio engine for synchronized playback
+ * High-precision Web Audio engine for synchronized playback
  * Optimized for low drift, accurate scheduling, and minimal overhead
  */
 
@@ -11,6 +11,7 @@ let gainNode = null;
 
 let playbackStartTime = 0; // AudioContext time when playback started
 let playbackOffset = 0;    // Offset in seconds inside track
+let isPlaying = false;
 
 /* -------------------------------------------------------------------------- */
 /*                            Context Initialization                           */
@@ -25,6 +26,12 @@ function getAudioContext() {
     gainNode = audioContext.createGain();
     gainNode.connect(audioContext.destination);
   }
+
+  // Mobile browsers sometimes start suspended
+  if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+
   return audioContext;
 }
 
@@ -37,10 +44,12 @@ export async function loadAudioFile(arrayBuffer) {
 
   stopPlayback();
 
+  // decodeAudioData requires a fresh buffer copy
   audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
 
   playbackOffset = 0;
   playbackStartTime = 0;
+  isPlaying = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -60,6 +69,7 @@ export function schedulePlayback(startTimeSec, offsetSec = 0) {
 
   playbackStartTime = startTimeSec;
   playbackOffset = offsetSec;
+  isPlaying = true;
 
   try {
     sourceNode.start(startTimeSec, offsetSec);
@@ -69,6 +79,7 @@ export function schedulePlayback(startTimeSec, offsetSec = 0) {
 
   sourceNode.onended = () => {
     sourceNode = null;
+    isPlaying = false;
   };
 }
 
@@ -81,9 +92,15 @@ export function stopPlayback() {
     try {
       sourceNode.stop();
     } catch {}
-    sourceNode.disconnect();
+
+    try {
+      sourceNode.disconnect();
+    } catch {}
+
     sourceNode = null;
   }
+
+  isPlaying = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -98,9 +115,10 @@ export function getCurrentTime() {
 export function getPlaybackProgress() {
   const ctx = getAudioContext();
 
-  if (!sourceNode) return playbackOffset;
+  if (!isPlaying) return playbackOffset;
 
   const elapsed = ctx.currentTime - playbackStartTime;
+
   return playbackOffset + Math.max(elapsed, 0);
 }
 
